@@ -1,14 +1,16 @@
 #pragma once
 
-struct InputsHandler {
-  InputsHandler() = delete;
-
-  static dvec2 mousePos;
+struct gui {
+  static u16 fps;
 
   static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
   static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
   static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos);
 
-  static void process();
+  static void init();
+  static void toggleConfig();
+  static void toggleInfo();
+  static void draw(float dt);
+  static void shutdown();
 };
 

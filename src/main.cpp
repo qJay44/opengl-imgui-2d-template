@@ -1,13 +1,16 @@
-#include <cstddef>
-#include <direct.h>
+#ifdef _WIN32
+  #include <direct.h>
+  #define CHDIR(p) _chdir(p);
+#else
+  #include <unistd.h>
+  #define CHDIR(p) chdir(p);
+#endif
 
-#include "imgui.h"
-#include "imgui_impl_glfw.h"
-#include "imgui_impl_opengl3.h"
-
-#include "utils/clrp.hpp"
+#include "global.hpp"
+#include "engine/gui/gui.hpp"
+#include "engine/Shader.hpp"
 #include "engine/InputsHandler.hpp"
-#include "engine/gui.hpp"
+#include "utils/clrp.hpp"
 
 using global::window;
 
@@ -20,21 +23,27 @@ void GLAPIENTRY MessageCallback(
   const GLchar* message,
   const void* userParam
 ) {
-  if (source == GL_DEBUG_SOURCE_SHADER_COMPILER) return; // Handled by the Shader class itself
+  static const clrp::clrp_t clrpError{clrp::ATTRIBUTE::BOLD, clrp::FG::RED};
+  static const clrp::clrp_t clrpWarning{clrp::ATTRIBUTE::BOLD, clrp::FG::YELLOW};
 
-  clrp::clrp_t clrpError;
-  clrpError.attr = clrp::ATTRIBUTE::BOLD;
-  clrpError.fg = clrp::FG::RED;
+  clrp::clrp_t clrpFinal = clrpError;
+
+  switch (source) {
+    case GL_DEBUG_SOURCE_SHADER_COMPILER:
+      return; // Handled by the Shader class itself
+    case GL_DEBUG_SOURCE_API:
+      clrpFinal = clrpWarning; // "SIMD32 shader inefficient", skipping since occurs only on my laptop
+  }
+
   fprintf(
     stderr, "GL CALLBACK: %s source = 0x%x, id = 0x%x type = 0x%x, severity = 0x%x, message = %s\n",
-    (type == GL_DEBUG_TYPE_ERROR ? "** GL ERROR **" : ""), source, id, type, severity, clrp::format(message, clrpError).c_str()
+    (type == GL_DEBUG_TYPE_ERROR ? "** GL ERROR **" : ""), source, id, type, severity, clrp::format(message, clrpFinal).c_str()
   );
-  exit(1);
 }
 
 int main() {
   // Assuming the executable is launching from its own directory
-  _chdir("../../../src");
+  CHDIR("../../..");
 
   // GLFW init
   glfwInit();
@@ -44,9 +53,10 @@ int main() {
   glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, true);
 
   // Window init
-  window = glfwCreateWindow(1200, 720, "Title", NULL, NULL);
-  ivec2 winSize;
-  glfwGetWindowSize(window, &winSize.x, &winSize.y);
+  window = glfwCreateWindow(1600, 900, "MyProgram", NULL, NULL);
+  global::profiler = new ProfilerManager(300);
+  ivec2 winSize = global::getWinSize();
+  dvec2 winCenter = dvec2(winSize) / 2.;
 
   if (!window) {
     printf("Failed to create GFLW window\n");
@@ -54,86 +64,75 @@ int main() {
     return EXIT_FAILURE;
   }
   glfwMakeContextCurrent(window);
-  glfwSetKeyCallback(window, InputsHandler::keyCallback);
-  glfwSetScrollCallback(window, InputsHandler::scrollCallback);
 
   // GLAD init
-  if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+  if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress)) {
     printf("Failed to initialize GLAD\n");
     return EXIT_FAILURE;
   }
 
-  // Setting the window
   glViewport(0, 0, winSize.x, winSize.y);
   glEnable(GL_DEBUG_OUTPUT);
   glDebugMessageCallback(MessageCallback, 0);
 
-  // ImGui init
-  IMGUI_CHECKVERSION();
-  ImGui::CreateContext();
-  ImGuiIO& io = ImGui::GetIO();
-  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-  io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-  ImGui_ImplGlfw_InitForOpenGL(window, true);
-  ImGui_ImplOpenGL3_Init();
+  gui::init();
 
-  struct Avg {
-    float ms = 0.f;
-    size_t fps = 0;
-    size_t frameIdx = 1;
-  } avg;
+  // ===== Shaders ============================================== //
+
+  Shader::setDirectoryLocation("res/shaders");
+
+  // ===== Inputs Handler ======================================= //
+
+  InputsHandler::mousePos = global::getWinCenter();
+  glfwSetScrollCallback(window, InputsHandler::scrollCallback);
+  glfwSetKeyCallback(window, InputsHandler::keyCallback);
+  glfwSetCursorPosCallback(window, InputsHandler::cursorPosCallback);
+
+  // ============================================================ //
+
+  glDisable(GL_CULL_FACE);
+  glDisable(GL_DEPTH_TEST);
 
   // Render loop
   while (!glfwWindowShouldClose(window)) {
-    static double titleTime = glfwGetTime();
-    static double prevTime = titleTime;
-    static double currTime = prevTime + 1e-6f;
+    static double titleTimer = glfwGetTime();
+    static double prevTime = titleTimer;
+    static double currTime = prevTime;
 
-    constexpr double fpsLimit = 1. / 144.;
+    constexpr double fpsLimit = 1. / 90.;
     currTime = glfwGetTime();
-    global::dt = currTime - prevTime;
+    float dt = currTime - prevTime;
 
     // FPS cap
-    if (global::dt < fpsLimit) continue;
+    if (dt < fpsLimit) continue;
     else prevTime = currTime;
 
-    global::time += global::dt;
+    global::time += dt;
 
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
-    ImGui::NewFrame();
-
-    const size_t fps = static_cast<size_t>(1.f / global::dt);
-    const float ms = global::dt * 1000.f;
-
-    // Show average (from 90 frames) fps and frame time
-    if (avg.frameIdx++ < 90) {
-      avg.fps += fps;
-      avg.ms += ms;
-      glfwSetWindowTitle(window, std::format("FPS: {} / {:.2f} ms", avg.fps / avg.frameIdx, avg.ms / avg.frameIdx).c_str());
+    if (glfwGetWindowAttrib(window, GLFW_FOCUSED)) {
+      InputsHandler::process();
     } else {
-      avg.fps /= avg.frameIdx;
-      avg.ms /= avg.frameIdx;
-      avg.frameIdx = 1;
-      glfwSetWindowTitle(window, std::format("FPS: {} / {:.2f} ms", avg.fps, avg.ms).c_str());
+      glfwSetCursorPos(window, winCenter.x, winCenter.y);
     }
 
+    // Update window title every 0.3 seconds
+    if (currTime - titleTimer >= 0.3) {
+      gui::fps = static_cast<u16>(1.f / dt);
+      titleTimer = currTime;
+    }
+
+    global::profiler->clearTasks();
+
     glClearColor(0.f, 0.f, 0.f, 1.f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // draw stuff...
-
-    gui::draw();
-    ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    gui::draw(dt);
 
     glfwSwapBuffers(window);
     glfwPollEvents();
   }
 
-  ImGui_ImplOpenGL3_Shutdown();
-  ImGui_ImplGlfw_Shutdown();
-  ImGui::DestroyContext();
+  gui::shutdown();
   glfwTerminate();
 
   return 0;
